@@ -8,7 +8,7 @@ import React, { useEffect, useState } from "react"
 import { cn } from "@/lib/utils"
 import { useUser } from "@clerk/nextjs"
 import axios from "axios"
-import { loadStripe } from "@stripe/stripe-js"
+import { loadStripe, Stripe } from "@stripe/stripe-js"
 import { toast } from "sonner"
 import { TITLE_TAILWIND_CLASS } from "@/utils/constants"
 import { useRouter } from "next/navigation"
@@ -132,35 +132,56 @@ export default function Pricing() {
   const [isYearly, setIsYearly] = useState<boolean>(false)
   const togglePricingPeriod = (value: string) => setIsYearly(parseInt(value) === 1)
   const { user } = useUser();
-  const [stripePromise, setStripePromise] = useState<Promise<any> | null>(null)
+  const [stripePromise, setStripePromise] = useState<Promise<Stripe | null>>(() => 
+    process.env.NEXT_PUBLIC_STRIPE_PUBLIC_KEY
+      ? loadStripe(process.env.NEXT_PUBLIC_STRIPE_PUBLIC_KEY)
+      : Promise.resolve(null)
+  );
 
   useEffect(() => {
-    setStripePromise(loadStripe(process.env.NEXT_PUBLIC_STRIPE_PUBLIC_KEY!))
-  }, [])
+    if (!process.env.NEXT_PUBLIC_STRIPE_PUBLIC_KEY) {
+      console.error('Stripe public key is not set');
+      toast('Configuration error: Stripe key is missing');
+    }
+  }, []);
 
   const handleCheckout = async (priceId: string, subscription: boolean) => {
-
     try {
-      const { data } = await axios.post(`/api/payments/create-checkout-session`,
-        { userId: user?.id, email: user?.emailAddresses?.[0]?.emailAddress, priceId, subscription });
-
-      if (data.sessionId) {
-        const stripe = await stripePromise;
-
-        const response = await stripe?.redirectToCheckout({
-          sessionId: data.sessionId,
-        });
-
-        return response
-      } else {
-        console.error('Failed to create checkout session');
-        toast('Failed to create checkout session')
-        return
+      if (!user?.id || !user?.emailAddresses?.[0]?.emailAddress) {
+        throw new Error('User information is missing');
       }
+
+      const { data } = await axios.post(`/api/payments/create-checkout-session`, {
+        userId: user.id,
+        email: user.emailAddresses[0].emailAddress,
+        priceId,
+        subscription
+      });
+
+      if (!data.sessionId) {
+        throw new Error('Failed to create checkout session: No sessionId returned');
+      }
+
+      const stripe = await stripePromise;
+      if (!stripe) {
+        throw new Error('Stripe has not been initialized');
+      }
+
+      const { error } = await stripe.redirectToCheckout({
+        sessionId: data.sessionId,
+      });
+
+      if (error) {
+        throw error;
+      }
+
     } catch (error) {
-      console.error('Error during checkout:', error);
-      toast('Error during checkout')
-      return
+      console.error('Detailed error during checkout:', error);
+      if (error instanceof Error) {
+        toast(`Checkout error: ${error.message}`);
+      } else {
+        toast('An unexpected error occurred during checkout');
+      }
     }
   };
 
@@ -203,9 +224,15 @@ export default function Pricing() {
       <PricingHeader title="Sample Pricing Plans" subtitle="Use these sample pricing cards in your SAAS" />
       <PricingSwitch onSwitch={togglePricingPeriod} />
       <section className="flex flex-col sm:flex-row sm:flex-wrap justify-center gap-8 mt-8">
-        {plans.map((plan) => {
-          return <PricingCard user={user} handleCheckout={handleCheckout} key={plan.title} {...plan} isYearly={isYearly} />
-        })}
+        {plans.map((plan) => (
+          <PricingCard 
+            key={plan.title} 
+            {...plan} 
+            isYearly={isYearly} 
+            user={user} 
+            handleCheckout={handleCheckout} 
+          />
+        ))}
       </section>
     </div>
   )
